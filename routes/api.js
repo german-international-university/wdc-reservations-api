@@ -2,9 +2,18 @@ require('dotenv').config();
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { v4 } = require('uuid');
 const db = require('../connectors/postgres');
+const mongoConnection = require('../connectors/mongo');
 const { sendKafkaMessage } = require('../connectors/kafka');
 const { validateTicketReservationDto } = require('../validation/reservation');
 const messagesType = require('../constants/messages');
+const { default: mongoose } = require('mongoose');
+const reservationSchema = mongoose.Schema({
+  id: String,
+  matchNumber: Number,
+  tickets: Number
+
+})
+const Reservation = mongoose.model('Reservation', reservationSchema);
 
 module.exports = (app) => {
   // HTTP endpoint to test health performance of service
@@ -24,13 +33,13 @@ module.exports = (app) => {
       // so shop consumers can process message and call
       // sp-shop-api to decrement available ticket count
       await sendKafkaMessage(messagesType.TICKET_PENDING, {
-        meta: { action: messagesType.TICKET_PENDING},
-        body: { 
+        meta: { action: messagesType.TICKET_PENDING },
+        body: {
           matchNumber: req.body.matchNumber,
           tickets: req.body.tickets,
         }
       });
-  
+
       // Perform Stripe Payment Flow
       try {
         const token = await stripe.tokens.create({
@@ -48,8 +57,8 @@ module.exports = (app) => {
           description: 'FIFA World Cup Ticket Reservation',
         });
         await sendKafkaMessage(messagesType.TICKET_RESERVED, {
-          meta: { action: messagesType.TICKET_RESERVED},
-          body: { 
+          meta: { action: messagesType.TICKET_RESERVED },
+          body: {
             matchNumber: req.body.matchNumber,
             tickets: req.body.tickets,
           }
@@ -57,19 +66,20 @@ module.exports = (app) => {
       } catch (stripeError) {
         // Send cancellation message indicating ticket sale failed
         await sendKafkaMessage(messagesType.TICKET_CANCELLED, {
-          meta: { action: messagesType.TICKET_CANCELLED},
-          body: { 
+          meta: { action: messagesType.TICKET_CANCELLED },
+          body: {
             matchNumber: req.body.matchNumber,
             tickets: req.body.tickets,
           }
         });
         return res.status(400).send(`could not process payment: ${stripeError.message}`);
       }
-      
+
       // Persist ticket sale in database with a generated reference id so user can lookup ticket
       const ticketReservation = { id: v4(), ...req.body };
       // const reservation = await db('reservations').insert(ticketReservation).returning('*');
-  
+      mongoConnection();
+      await Reservation.create(ticketReservation);
       // Return success response to client
       return res.json({
         message: 'Ticket Purchase Successful',
